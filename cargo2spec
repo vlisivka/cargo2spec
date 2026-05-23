@@ -1,0 +1,113 @@
+#!/bin/bash
+# Simple script to generate RPM Spec file for cargo package.
+# Usage: cargo2spec package[@version]
+# Author: Volodymyr M. Lisivka <vlisivka@gmail.com>
+# License: GPLv3
+
+set -ueE -o pipefail
+
+PACKAGE_NAME="${1:?Usage: $0 <cargo_package_name>}"
+
+panic() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+# Get package info from cargo info
+INFO=$(LANG=C cargo info "$PACKAGE_NAME")
+
+# Abort if cargo returned nothing
+[ -n "$INFO" ] || panic "No information about package \"$PACKAGE_NAME\" is returned by \"cargo info $PACKAGE_NAME\" command."
+
+# Strip @version from package name, if any
+PACKAGE_NAME="${PACKAGE_NAME%@*}"
+
+VERSION=""
+TAGS=""
+LICENSE=""
+RUST_VERSION=""
+DOC_URL=""
+HOMEPAGE_URL=""
+REPO_URL=""
+CRATESIO_URL=""
+DESCRIPTION=""
+
+# Read INFO line by line and extract values using pure bash
+FIRST_LINE=true
+while IFS= read -r line; do
+  [ -n "$line" ] || continue
+
+  if [ "$FIRST_LINE" = true ]; then
+    # The first line is usually the package name and tags
+    FIRST_LINE=false
+    TAGS="$line"
+    continue
+  fi
+
+  case "$line" in
+    "version: "[0-9]*) VERSION="${line#*: }" ; VERSION=${VERSION%% *};;
+    "rust-version: "[0-9]*) RUST_VERSION="${line#*: }"; RUST_VERSION=${RUST_VERSION%% *};;
+
+    "license: "*)        LICENSE="${line#*: }";;
+    "documentation: "*)  DOC_URL="${line#*: }";;
+    "homepage: "*)  HOMEPAGE_URL="${line#*: }";;
+    "repository: "*)    REPO_URL="${line#*: }";;
+    "crates.io: "*) CRATESIO_URL="${line#*: }";;
+
+    *)
+      # If it's not a known key, and we haven't found the description yet, 
+      # this might be the description line (if it doesn't look like "key: value")
+      if [ -z "$DESCRIPTION" ] && [[ ! "$line" =~ ^[a-zA-Z0-9._-]+:[[:space:]] ]]; then
+        DESCRIPTION="$line"
+      fi
+    ;;
+  esac
+done <<< "$INFO"
+
+SPEC_FILE="$PACKAGE_NAME.spec"
+
+cat <<EOF > "$SPEC_FILE"
+Name:           ${PACKAGE_NAME}
+Version:        ${VERSION}
+Release:        1%{?dist}
+Summary:        ${DESCRIPTION:-RPM package generated from cargo package ${PACKAGE_NAME}}
+License:        ${LICENSE:-Unknown}
+BuildArch:      x86_64
+
+BuildRequires:  cargo
+BuildRequires:  rust${RUST_VERSION:+ >= $RUST_VERSION}
+
+%description
+$DESCRIPTION
+
+${DOC_URL:+Documentation: $DOC_URL}
+${HOMEPAGE_URL:+Homepage: $HOMEPAGE_URL}
+${REPO_URL:+Repository: $REPO_URL}
+${CRATESIO_URL:+Crates.io: $CRATESIO_URL}
+
+$TAGS
+
+%build
+cargo install --force --locked "$PACKAGE_NAME" --version "$VERSION" --root "./release"
+
+%install
+mkdir -p "%{buildroot}%{_bindir}"
+strip ./release//bin/*
+mv -f ./release/bin/* "%{buildroot}%{_bindir}/"
+
+%files
+%{_bindir}/*
+
+%changelog
+* $(LANG=C date "+%a %b %d %Y") Cargo2Spec Generator <cargo2spec@vlisivka.github.com> - ${VERSION}-1
+- Initial package creation
+EOF
+
+cat <<EOF
+Spec file generated for $PACKAGE_NAME@$VERSION: $SPEC_FILE
+To build package, use command:
+
+  rpmbuild -ba $SPEC_FILE
+
+then look for built package in $HOME/rpmbuild/RPMS/ directory.
+EOF
