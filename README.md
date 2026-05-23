@@ -2,7 +2,7 @@
 
 Create RPM Spec files for `cargo install`.
 
-Usage: `cargo2sepc CARGO_PACKAGE_NAME`
+Usage: `cargo2spec CARGO_PACKAGE_NAME`
 
 Then build RPM package from generated .spec file using command 
 `rpmbuild -ba NAME.spec` , then grab binary RPM file from
