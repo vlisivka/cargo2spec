@@ -1,0 +1,139 @@
+#!/bin/bash
+# Simple script to generate RPM Spec file for a NodeJS npm package.
+# Usage: npm2spec package[@version]
+# Author: Volodymyr M. Lisivka <vlisivka@gmail.com>
+# License: GPLv3
+
+set -ueE -o pipefail
+
+NPM_PACKAGE_NAME="${1:?Usage: $0 <npm_package_name>}"
+
+panic() {
+  echo "ERROR: $*" >&2
+  exit 1
+}
+
+# Strip @version from the full package name, if provided.
+# Scoped packages look like @scope/name and non-scoped are just name.
+# A version pin looks like package@1.2.3 or @scope/name@1.2.3.
+PACKAGE_NAME="$NPM_PACKAGE_NAME"
+if [[ "$NPM_PACKAGE_NAME" =~ ^.+@.+ ]]; then
+  PACKAGE_NAME="${NPM_PACKAGE_NAME%@*}" # Strip version
+fi
+
+VERSION=""
+DESCRIPTION=""
+HOMEPAGE_URL=""
+LICENSE=""
+HEADER=""
+LINE_NUM=0
+
+# Fetch the full npm view output (text format, no --json)
+INFO=$(LANG=C npm view "$NPM_PACKAGE_NAME" 2>/dev/null) || panic "Command \`npm view \"$NPM_PACKAGE_NAME\"\` failed."
+[ -n "$INFO" ] || panic "No information about package \"$PACKAGE_NAME\" is returned by \"npm view $NPM_PACKAGE_NAME\" command."
+
+# Parse lines 2–4 from the npm view output using pure bash (no sed/awk)
+readarray -t LINES <<< "$INFO" || panic "Cannot parse package information returned by \"npm view $NPM_PACKAGE_NAME\" command."
+DESCRIPTION="${LINES[2]}"
+if [[ "${LINES[3]}" =~ ^https?:// ]]; then
+    HOMEPAGE_URL="${LINES[3]}"
+fi
+
+# Header: "name@version | license | deps: N | versions: N"
+IFS='|' read -r -a HEADER <<< "${LINES[1]}"
+VERSION="${HEADER[0]##*@}" # strip package name
+VERSION="${VERSION// /}"   # trim space, if any
+LICENSE="${HEADER[1]// /}"
+
+# Fetch individual fields via separate npm view calls for accuracy
+REPO_URL=$(LANG=C npm view "$NPM_PACKAGE_NAME" repository.url 2>/dev/null) || REPO_URL=""
+NODE_ENGINE=$(LANG=C npm view "$NPM_PACKAGE_NAME" engines.node 2>/dev/null) || NODE_ENGINE=""
+
+# Parse bin commands from "npm view <pkg> bin" output.
+# Format: "{ cmd1: 'path1', cmd2: 'path2' }" or empty if no bins.
+BIN_OUTPUT=$(LANG=C npm view "$NPM_PACKAGE_NAME" bin 2>/dev/null) || BIN_OUTPUT=""
+BIN_COMMANDS=()
+if [[ "$BIN_OUTPUT" == \{* ]]; then
+  IFS=' ' read -ra KEYS <<< "$BIN_OUTPUT"
+  for key in "${KEYS[@]}"; do
+    case "$key" in
+      *:) BIN_COMMANDS+=( "${key%:}" ) ;;
+    esac
+  done
+fi
+
+# Build the symlink creation section for %install
+SYMLINK_SECTION=""
+for cmd in "${BIN_COMMANDS[@]}"; do
+  SYMLINK_SECTION+="ln -srf %{buildroot}%{_datadir}/${PACKAGE_NAME}/node_modules/.bin/${cmd} %{buildroot}%{_bindir}/${cmd}
+"
+done
+
+# Build the %files entries for symlinks
+FILES_SYMLINKS=""
+for cmd in "${BIN_COMMANDS[@]}"; do
+  FILES_SYMLINKS+="%{_bindir}/${cmd}
+"
+done
+
+# Generate a filename-safe spec file name (and )
+SPEC_NAME="${PACKAGE_NAME//\//-}" # replace / with -
+SPEC_NAME="${SPEC_NAME#@}" # strip leading @
+SPEC_FILE="${SPEC_NAME}.spec"
+
+# RPM package name: for scoped packages use nodejs-scope-name, else just the name
+RPM_NAME="$SPEC_NAME"
+if [[ "$PACKAGE_NAME" =~ ^@ ]]; then
+  RPM_NAME="nodejs-${SPEC_NAME}"
+fi
+
+cat <<EOF > "$SPEC_FILE"
+Name:           ${RPM_NAME}
+Version:        ${VERSION:-unknown}
+Release:        1%{?dist}
+Summary:        ${DESCRIPTION:-RPM package for npm package ${PACKAGE_NAME}}
+License:        ${LICENSE:-Unknown}
+BuildArch:      noarch
+
+BuildRequires:  npm
+${NODE_ENGINE:+BuildRequires:  nodejs ${NODE_ENGINE/=/= }}
+
+%description
+${DESCRIPTION:-RPM package generated from npm package ${PACKAGE_NAME}.}
+
+${HOMEPAGE_URL:+Homepage: $HOMEPAGE_URL}
+${REPO_URL:+Repository: $REPO_URL}
+
+%build
+mkdir -p buildroot
+cd buildroot
+npm install --no-save "${PACKAGE_NAME}@${VERSION}"
+
+%install
+rm -rf %{buildroot}
+mkdir -p %{buildroot}%{_datadir}/${PACKAGE_NAME}/node_modules
+cp -r buildroot/node_modules %{buildroot}%{_datadir}/${PACKAGE_NAME}/
+
+# Create symbolic links for each binary provided by the package
+mkdir -p %{buildroot}%{_bindir}
+${SYMLINK_SECTION}
+
+%clean
+rm -rf %{buildroot}
+
+%files
+%{_datadir}/${PACKAGE_NAME}/node_modules/
+${FILES_SYMLINKS}
+%changelog
+* $(LANG=C date "+%a %b %d %Y") Npm2Spec Generator <npm2spec@vlisivka.github.com> - ${VERSION:-unknown}-1
+- Initial package creation
+EOF
+
+cat <<EOF
+Spec file generated for $PACKAGE_NAME@${VERSION:-unknown}: $SPEC_FILE
+To build package, use command:
+
+  rpmbuild -ba $SPEC_FILE
+
+then look for built package in ~/rpmbuild/RPMS/ directory.
+EOF
