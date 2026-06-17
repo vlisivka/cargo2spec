@@ -72,7 +72,6 @@ Version:        ${VERSION}
 Release:        1%{?dist}
 Summary:        ${DESCRIPTION:-RPM package generated from cargo package ${PACKAGE_NAME}}
 License:        ${LICENSE:-Unknown}
-BuildArch:      x86_64
 
 BuildRequires:  cargo
 BuildRequires:  rust${RUST_VERSION:+ >= $RUST_VERSION}
